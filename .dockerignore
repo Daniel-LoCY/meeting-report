@@ -1,0 +1,10 @@
+data/
+.git/
+__pycache__/
+.pytest_cache/
+.venv/
+test-results/
+validation_screenshots/
+*.pyc
+*.pyo
+*.log

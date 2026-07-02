@@ -1,0 +1,34 @@
+# Decision Record: 即時預覽資料流
+
+- 背景與問題：
+  - 使用者需要在會議記錄整理過程中即時預覽結果，而不是等到 Markdown 檔案完成後才下載。
+  - 既有後端已具備 `POST /api/jobs` 與 `GET /api/jobs/{job_id}` 輪詢式工作狀態，前端也已依此輪詢進度。
+- 已評估選項：
+  - 採用方案：沿用 `GET /api/jobs/{job_id}`，新增 `transcript_preview`、`report_preview`、`preview_updated_at` 欄位。
+  - 替代方案：新增 Server-Sent Events 或 WebSocket 串流 endpoint。
+  - 替代方案：前端直接讀取已寫入的逐字稿與報告檔。
+- 採用原因：
+  - 可維持既有 API 使用方式與前端輪詢流程，修改範圍小且容易回滾。
+  - 逐字稿可在 faster-whisper 產生 segment 時回填預覽，符合目前「處理中可看結果」需求。
+  - 報告預覽可在 Ollama 完成分段或最終生成後回填，不需要先重寫 LLM 呼叫層。
+- 放棄原因：
+  - SSE/WebSocket 需要新增連線生命週期、錯誤恢復與前端狀態處理，目前需求尚未要求 token-by-token streaming。
+  - 直接讀檔會讓前端依賴檔案落地時機，也會讓尚未完成的檔案狀態不清楚。
+- 取捨與風險：
+  - 優點：低耦合、低修改量、沿用現有 job contract。
+  - 風險：報告預覽不是 token-by-token；長文字透過輪詢回傳可能增加 response 大小。
+  - 緩解：以 `PREVIEW_LIMIT` 限制預覽長度，預設保留最新 12000 字元。
+- 驗證方式：
+  - `docker compose build && docker compose up -d`
+  - `curl http://localhost:8001/api/health`
+  - 使用 `/home/robertlo/Downloads/voice_207078.aac` 建立 job，確認 `transcript_preview`、`report_preview`、`report_url`、`transcript_url`。
+  - 使用 Chromium screenshot 驗證 desktop/mobile 預覽介面。
+- rollback 條件：
+  - 若輪詢 response 對長會議造成明顯延遲，可先降低 `PREVIEW_LIMIT`。
+  - 若需要真正 token streaming，再新增 SSE/WebSocket endpoint，並保留目前欄位作為 fallback。
+  - 若需快速回退，可移除新增的 preview 欄位、callback 與前端預覽區，既有下載流程不受影響。
+- 資訊來源 / 參考資料：
+  - 本地：`/home/robertlo/Desktop/personal/Tool/meeting/app/main.py`，用途：job 狀態與 API contract。
+  - 本地：`/home/robertlo/Desktop/personal/Tool/meeting/app/meeting_service.py`，用途：轉錄 segment 與 Ollama 摘要流程。
+  - 本地：`/home/robertlo/Desktop/personal/Tool/meeting/app/static/app.js`，用途：既有前端輪詢流程。
+  - 使用者需求：加入可即時預覽結果的界面功能，並以 `/home/robertlo/Downloads/voice_207078.aac` 測試。

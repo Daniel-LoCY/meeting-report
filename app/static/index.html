@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>會議記錄整理工具</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="hero">
+        <div>
+          <p class="eyebrow">Local AI Meeting Reporter</p>
+          <h1>會議記錄整理工具</h1>
+          <p class="lead">上傳音訊或影片，使用 Docker 內的 faster-whisper 轉錄，再由 Ollama 地端模型整理成 Markdown 會議報告。</p>
+        </div>
+        <div class="meter" aria-label="處理流程">
+          <span>Upload</span>
+          <span>Transcribe</span>
+          <span>Summarize</span>
+          <span>Export</span>
+        </div>
+      </section>
+
+      <section class="layout">
+        <form id="uploadForm" class="panel" autocomplete="off">
+          <div class="panel-head">
+            <h2>建立報告</h2>
+            <span class="status-pill" id="ollamaStatus">檢查中</span>
+          </div>
+
+          <label class="field">
+            <span>會議名稱</span>
+            <input name="meeting_title" type="text" placeholder="例如：產品週會 2026-07-02" />
+          </label>
+
+          <label class="field">
+            <span>音訊或影片檔</span>
+            <input name="file" type="file" accept="audio/*,video/*,.m4a,.mp3,.wav,.mp4,.mov,.mkv,.webm" required />
+          </label>
+
+          <div class="grid-two">
+            <label class="field">
+              <span>語音語言</span>
+              <select name="language">
+                <option value="zh" selected>中文</option>
+                <option value="en">英文</option>
+                <option value="">自動偵測</option>
+              </select>
+            </label>
+
+            <label class="field">
+              <span>報告風格</span>
+              <select name="report_mode">
+                <option value="standard" selected>標準整理</option>
+                <option value="executive">主管摘要</option>
+                <option value="action">行動追蹤</option>
+              </select>
+            </label>
+          </div>
+
+          <label class="field">
+            <span>輸出語言</span>
+            <select name="output_language">
+              <option value="繁體中文" selected>繁體中文</option>
+              <option value="English">English</option>
+              <option value="日本語">日本語</option>
+            </select>
+          </label>
+
+          <button class="primary" type="submit">
+            <span class="btn-icon" aria-hidden="true">↑</span>
+            開始整理
+          </button>
+        </form>
+
+        <aside class="panel">
+          <div class="panel-head">
+            <h2>硬體與模型</h2>
+            <button id="refreshHealth" class="ghost" type="button" title="重新檢查">重新檢查</button>
+          </div>
+          <dl class="facts" id="hardwareFacts">
+            <div><dt>CPU</dt><dd>讀取中</dd></div>
+            <div><dt>RAM</dt><dd>讀取中</dd></div>
+            <div><dt>GPU</dt><dd>讀取中</dd></div>
+            <div><dt>Whisper</dt><dd>讀取中</dd></div>
+            <div><dt>Ollama</dt><dd>讀取中</dd></div>
+          </dl>
+          <p class="note" id="modelReason">正在取得建議模型。</p>
+        </aside>
+      </section>
+
+      <section class="panel result-panel" aria-live="polite">
+        <div class="panel-head">
+          <h2>處理狀態</h2>
+          <span id="jobId" class="muted">尚未建立工作</span>
+        </div>
+        <div class="progress-wrap">
+          <div class="progress-bar"><span id="progressBar"></span></div>
+          <strong id="progressText">0%</strong>
+        </div>
+        <div id="jobMessage" class="message">等待上傳檔案。</div>
+        <div class="preview-panel">
+          <div class="preview-head">
+            <h3>即時預覽</h3>
+            <div class="preview-tabs" role="tablist" aria-label="預覽內容">
+              <button class="preview-tab active" type="button" data-preview-tab="transcript" role="tab" aria-selected="true">逐字稿</button>
+              <button class="preview-tab" type="button" data-preview-tab="report" role="tab" aria-selected="false">報告</button>
+            </div>
+          </div>
+          <pre id="previewBox" class="preview-box">尚無預覽內容。</pre>
+          <div id="previewMeta" class="preview-meta">等待處理開始。</div>
+        </div>
+        <div id="downloads" class="downloads" hidden>
+          <a id="reportLink" class="download" href="#">下載會議報告</a>
+          <a id="transcriptLink" class="download" href="#">下載逐字稿</a>
+        </div>
+        <pre id="errorBox" class="error-box" hidden></pre>
+      </section>
+    </main>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>
