@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from app.meeting_service import call_external_llm, external_api_status, transcribe_audio
-from app.model_selector import ModelRecommendation, recommend_models
+from app.model_selector import GpuInfo, HardwareProfile, ModelRecommendation, recommend_models
 
 
 class FakeResponse:
@@ -27,65 +27,70 @@ class FakeResponse:
             raise error
 
 
+class FakeSegment:
+    def __init__(self, start: float, end: float, text: str) -> None:
+        self.start = start
+        self.end = end
+        self.text = text
+
+
+class FakeWhisperModel:
+    def transcribe(self, *args: object, **kwargs: object) -> tuple[list[FakeSegment], object]:
+        del args, kwargs
+        return [FakeSegment(0, 1.5, "第一段"), FakeSegment(1.5, 3, "第二段")], type(
+            "Info", (), {"language": "zh", "language_probability": 0.98, "duration": 3.0}
+        )()
+
+
 def recommendation() -> ModelRecommendation:
     return ModelRecommendation(
-        base_url="https://api.example.test/v1",
-        api_key_env="EXTERNAL_API_KEY",
-        transcription_model="transcribe-test",
+        whisper_model="medium",
+        whisper_device="cuda",
+        whisper_compute_type="float16",
+        chat_base_url="https://api.example.test/v1",
+        chat_api_key_env="MEETING_CHAT_API_KEY",
         llm_model="chat-test",
         reason="test",
     )
 
 
 class ExternalAPITest(unittest.TestCase):
-    def test_recommendation_uses_external_models_without_hardware_selection(self) -> None:
+    def test_recommendation_keeps_gpu_whisper_and_uses_external_chat(self) -> None:
+        profile = HardwareProfile(cpu_count=8, memory_gb=32, gpu=GpuInfo("Test GPU", 12))
         with patch.dict(
             os.environ,
             {
-                "EXTERNAL_API_BASE_URL": "https://provider.example/v1",
-                "EXTERNAL_API_KEY_ENV": "EXTERNAL_API_KEY",
-                "EXTERNAL_LLM_MODEL": "chat-model",
-                "EXTERNAL_TRANSCRIPTION_MODEL": "transcribe-model",
+                "MEETING_CHAT_API_BASE_URL": "https://provider.example/v1",
+                "MEETING_CHAT_API_KEY_ENV": "MEETING_CHAT_API_KEY",
+                "MEETING_CHAT_MODEL": "chat-model",
             },
             clear=True,
         ):
-            value = recommend_models()
+            value = recommend_models(profile)
 
-        self.assertEqual(value.base_url, "https://provider.example/v1")
+        self.assertEqual(value.whisper_model, "medium")
+        self.assertEqual(value.whisper_device, "cuda")
+        self.assertEqual(value.chat_base_url, "https://provider.example/v1")
         self.assertEqual(value.llm_model, "chat-model")
-        self.assertEqual(value.transcription_model, "transcribe-model")
-        self.assertNotIn("GPU", value.reason)
 
-    def test_transcription_posts_multipart_to_external_api_and_formats_segments(self) -> None:
-        payload = {
-            "language": "zh",
-            "text": "第一段 第二段",
-            "segments": [
-                {"start": 0, "end": 1.5, "text": "第一段"},
-                {"start": 1.5, "end": 3, "text": "第二段"},
-            ],
-        }
+    def test_transcription_uses_local_whisper_and_preserves_segments(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             audio = Path(temporary_directory) / "meeting.wav"
             audio.write_bytes(b"audio")
             events: list[tuple[str, str]] = []
-            with (
-                patch.dict(os.environ, {"EXTERNAL_API_KEY": "test-key"}, clear=True),
-                patch("app.meeting_service.requests.post", return_value=FakeResponse(payload)) as post,
-            ):
+            with patch("app.meeting_service.get_whisper_model", return_value=FakeWhisperModel()) as get_model:
                 result = transcribe_audio(audio, recommendation(), "zh", lambda stage, text: events.append((stage, text)))
 
         self.assertEqual(result["duration"], 3.0)
         self.assertIn("[00:00:00 - 00:00:01] 第一段", result["transcript"])
-        self.assertEqual(events[0][0], "uploading_audio")
+        self.assertEqual(events[0][0], "loading_whisper")
         self.assertEqual(events[-1][0], "transcribing")
-        self.assertEqual(post.call_args.kwargs["headers"]["Authorization"], "Bearer test-key")
-        self.assertEqual(post.call_args.args[0], "https://api.example.test/v1/audio/transcriptions")
+        self.assertEqual(get_model.call_args.args, ("medium", "cuda", "float16"))
 
-    def test_report_generation_uses_chat_completions_with_bearer_auth(self) -> None:
+    def test_report_generation_uses_external_chat_completions_with_bearer_auth(self) -> None:
         payload = {"choices": [{"message": {"content": "# 報告"}}]}
         with (
-            patch.dict(os.environ, {"EXTERNAL_API_KEY": "test-key"}, clear=True),
+            patch.dict(os.environ, {"MEETING_CHAT_API_KEY": "test-key"}, clear=True),
             patch("app.meeting_service.requests.post", return_value=FakeResponse(payload)) as post,
         ):
             report = call_external_llm(recommendation(), "prompt")
@@ -95,18 +100,15 @@ class ExternalAPITest(unittest.TestCase):
         self.assertEqual(post.call_args.kwargs["json"]["model"], "chat-test")
         self.assertEqual(post.call_args.kwargs["headers"]["Authorization"], "Bearer test-key")
 
-    def test_health_status_requires_external_key_and_checks_both_models(self) -> None:
+    def test_health_status_requires_chat_key_and_checks_chat_model(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
             missing = external_api_status(recommendation())
         self.assertFalse(missing["available"])
-        self.assertIn("EXTERNAL_API_KEY", str(missing["detail"]))
+        self.assertIn("MEETING_CHAT_API_KEY", str(missing["detail"]))
 
         with (
-            patch.dict(os.environ, {"EXTERNAL_API_KEY": "test-key"}, clear=True),
-            patch(
-                "app.meeting_service.requests.get",
-                return_value=FakeResponse({"data": [{"id": "chat-test"}, {"id": "transcribe-test"}]}),
-            ),
+            patch.dict(os.environ, {"MEETING_CHAT_API_KEY": "test-key"}, clear=True),
+            patch("app.meeting_service.requests.get", return_value=FakeResponse({"data": [{"id": "chat-test"}]})),
         ):
             ready = external_api_status(recommendation())
         self.assertTrue(ready["available"])

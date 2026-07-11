@@ -43,9 +43,10 @@ function renderHealth(data) {
     return;
   }
   providerFacts.innerHTML = `
-    <div><dt>Endpoint</dt><dd>${escapeHtml(rec.base_url)}</dd></div>
-    <div><dt>轉錄模型</dt><dd>${escapeHtml(rec.transcription_model)}</dd></div>
+    <div><dt>報告 API</dt><dd>${escapeHtml(rec.chat_base_url)}</dd></div>
     <div><dt>報告模型</dt><dd>${escapeHtml(rec.llm_model)}</dd></div>
+    <div><dt>Whisper</dt><dd>${escapeHtml(rec.whisper_model)}</dd></div>
+    <div><dt>轉錄裝置</dt><dd>${escapeHtml(rec.whisper_device)} / ${escapeHtml(rec.whisper_compute_type)}</dd></div>
   `;
   modelReason.textContent = rec.reason;
 

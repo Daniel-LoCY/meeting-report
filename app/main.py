@@ -11,7 +11,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.meeting_service import decorate_report, external_api_status, generate_report, transcribe_audio
-from app.model_selector import ExternalAPIConfigurationError, recommend_models
+from app.model_selector import ExternalAPIConfigurationError, detect_hardware, recommend_models
 
 APP_DIR = Path(__file__).resolve().parent
 DATA_DIR = Path(__import__("os").getenv("APP_DATA_DIR", "/data"))
@@ -41,8 +41,14 @@ def health() -> dict[str, Any]:
     except ExternalAPIConfigurationError as exc:
         return {"status": "not_ready", "external_api": {"available": False, "detail": str(exc)}}
     api_status = external_api_status(recommendation)
+    profile = detect_hardware()
     return {
         "status": "ok" if api_status["available"] else "not_ready",
+        "hardware": {
+            "cpu_count": profile.cpu_count,
+            "memory_gb": profile.memory_gb,
+            "gpu": None if profile.gpu is None else {"name": profile.gpu.name, "memory_gb": profile.gpu.memory_gb},
+        },
         "recommendation": recommendation.__dict__,
         "external_api": api_status,
     }
@@ -156,7 +162,7 @@ def _process_job(
 ) -> None:
     def progress(stage: str, message: str) -> None:
         progress_map = {
-            "uploading_audio": 15,
+            "loading_whisper": 15,
             "transcribing": 35,
             "checking_llm": 65,
             "summarizing": 82,
@@ -180,7 +186,7 @@ def _process_job(
         )
 
     try:
-        progress("uploading_audio", "準備上傳音訊")
+        progress("loading_whisper", "準備本機 Whisper 轉錄")
         transcript_meta = transcribe_audio(
             upload_path,
             recommendation,

@@ -7,15 +7,22 @@ services:
       - "${APP_PORT:-8001}:8000"
     environment:
       APP_DATA_DIR: "/data"
-      EXTERNAL_API_BASE_URL: "${EXTERNAL_API_BASE_URL:-https://api.openai.com/v1}"
-      EXTERNAL_API_KEY: "${EXTERNAL_API_KEY:-}"
-      EXTERNAL_API_KEY_ENV: "EXTERNAL_API_KEY"
-      EXTERNAL_LLM_MODEL: "${EXTERNAL_LLM_MODEL:-gpt-4o-mini}"
-      EXTERNAL_TRANSCRIPTION_MODEL: "${EXTERNAL_TRANSCRIPTION_MODEL:-gpt-4o-mini-transcribe}"
-      EXTERNAL_TRANSCRIPTION_RESPONSE_FORMAT: "${EXTERNAL_TRANSCRIPTION_RESPONSE_FORMAT:-verbose_json}"
+      WHISPER_CACHE_DIR: "/models/whisper"
+      WHISPER_MODEL: "${WHISPER_MODEL:-}"
+      WHISPER_DEVICE: "${WHISPER_DEVICE:-}"
+      WHISPER_COMPUTE_TYPE: "${WHISPER_COMPUTE_TYPE:-}"
+      MEETING_CHAT_API_BASE_URL: "${MEETING_CHAT_API_BASE_URL:-https://generativelanguage.googleapis.com/v1beta/openai}"
+      MEETING_CHAT_API_KEY: "${MEETING_CHAT_API_KEY:-${EXTERNAL_API_KEY:-}}"
+      MEETING_CHAT_API_KEY_ENV: "MEETING_CHAT_API_KEY"
+      MEETING_CHAT_MODEL: "${MEETING_CHAT_MODEL:-gemini-3.5-flash}"
       DEFAULT_LANGUAGE: "zh"
       OUTPUT_LANGUAGE: "繁體中文"
-      MAX_UPLOAD_MB: "${MAX_UPLOAD_MB:-25}"
+      MAX_UPLOAD_MB: "${MAX_UPLOAD_MB:-800}"
       PREVIEW_LIMIT: "${PREVIEW_LIMIT:-12000}"
     volumes:
       - ./data:/data
+      - whisper-cache:/models/whisper
+    gpus: all
+
+volumes:
+  whisper-cache:
