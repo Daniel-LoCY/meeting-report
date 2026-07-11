@@ -1,102 +1,56 @@
 from __future__ import annotations
 
 import os
-import shutil
-import subprocess
 from dataclasses import dataclass
-
-import psutil
-
-
-@dataclass(frozen=True)
-class GpuInfo:
-    name: str
-    memory_gb: float
+from urllib.parse import urlsplit, urlunsplit
 
 
-@dataclass(frozen=True)
-class HardwareProfile:
-    cpu_count: int
-    memory_gb: float
-    gpu: GpuInfo | None
+class ExternalAPIConfigurationError(ValueError):
+    pass
 
 
 @dataclass(frozen=True)
 class ModelRecommendation:
-    whisper_model: str
-    whisper_device: str
-    whisper_compute_type: str
-    ollama_model: str
+    base_url: str
+    api_key_env: str
+    transcription_model: str
+    llm_model: str
     reason: str
 
 
-def detect_hardware() -> HardwareProfile:
-    cpu_count = os.cpu_count() or 1
-    memory_gb = psutil.virtual_memory().total / 1024**3
-    gpu = _detect_nvidia_gpu()
-    return HardwareProfile(cpu_count=cpu_count, memory_gb=round(memory_gb, 1), gpu=gpu)
-
-
-def recommend_models(profile: HardwareProfile | None = None) -> ModelRecommendation:
-    profile = profile or detect_hardware()
-    forced_whisper = os.getenv("WHISPER_MODEL")
-    forced_ollama = os.getenv("OLLAMA_MODEL")
-
-    if profile.gpu and profile.gpu.memory_gb >= 20:
-        whisper_model = "large-v3"
-        ollama_model = "qwen2.5:14b"
-        reason = "偵測到 20GB 以上 VRAM，可使用較高品質模型。"
-    elif profile.gpu and profile.gpu.memory_gb >= 10:
-        whisper_model = "medium"
-        ollama_model = "qwen2.5:7b"
-        reason = "偵測到 10GB 以上 VRAM，優先平衡轉錄品質、中文整理能力與延遲。"
-    elif profile.gpu and profile.gpu.memory_gb >= 6:
-        whisper_model = "small"
-        ollama_model = "qwen2.5:7b"
-        reason = "偵測到中階 GPU，降低 Whisper 模型大小以保留 LLM 推論空間。"
-    elif profile.memory_gb >= 24:
-        whisper_model = "small"
-        ollama_model = "qwen2.5:3b"
-        reason = "未偵測到可用 GPU，但記憶體足夠，以 CPU 模式執行較小模型。"
-    else:
-        whisper_model = "base"
-        ollama_model = "qwen2.5:1.5b"
-        reason = "硬體資源有限，使用輕量模型避免處理時間過長。"
-
-    device = "cuda" if profile.gpu else "cpu"
-    compute_type = "float16" if profile.gpu else "int8"
-
+def recommend_models() -> ModelRecommendation:
+    base_url = os.getenv("EXTERNAL_API_BASE_URL", "https://api.openai.com/v1").strip().rstrip("/")
+    api_key_env = os.getenv("EXTERNAL_API_KEY_ENV", "EXTERNAL_API_KEY").strip()
+    llm_model = os.getenv("EXTERNAL_LLM_MODEL", "gpt-4o-mini").strip()
+    transcription_model = os.getenv("EXTERNAL_TRANSCRIPTION_MODEL", "gpt-4o-mini-transcribe").strip()
+    validate_external_configuration(base_url, api_key_env, llm_model, transcription_model)
     return ModelRecommendation(
-        whisper_model=forced_whisper or whisper_model,
-        whisper_device=os.getenv("WHISPER_DEVICE") or device,
-        whisper_compute_type=os.getenv("WHISPER_COMPUTE_TYPE") or compute_type,
-        ollama_model=forced_ollama or ollama_model,
-        reason=reason,
+        base_url=base_url,
+        api_key_env=api_key_env,
+        transcription_model=transcription_model,
+        llm_model=llm_model,
+        reason="使用外部 OpenAI-compatible transcription 與 Chat Completions API，不在本機載入 Whisper 或 LLM 模型。",
     )
 
 
-def _detect_nvidia_gpu() -> GpuInfo | None:
-    if not shutil.which("nvidia-smi"):
-        return None
+def validate_external_configuration(
+    base_url: str,
+    api_key_env: str,
+    llm_model: str,
+    transcription_model: str,
+) -> None:
+    parsed = urlsplit(base_url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ExternalAPIConfigurationError("EXTERNAL_API_BASE_URL 必須是完整 HTTP(S) URL。")
+    if not api_key_env:
+        raise ExternalAPIConfigurationError("EXTERNAL_API_KEY_ENV 不可為空白。")
+    if not llm_model:
+        raise ExternalAPIConfigurationError("EXTERNAL_LLM_MODEL 不可為空白。")
+    if not transcription_model:
+        raise ExternalAPIConfigurationError("EXTERNAL_TRANSCRIPTION_MODEL 不可為空白。")
 
-    try:
-        result = subprocess.run(
-            [
-                "nvidia-smi",
-                "--query-gpu=name,memory.total",
-                "--format=csv,noheader,nounits",
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-    except (subprocess.SubprocessError, OSError):
-        return None
 
-    first_line = result.stdout.strip().splitlines()[0] if result.stdout.strip() else ""
-    if not first_line:
-        return None
-
-    name, memory_mb = [part.strip() for part in first_line.rsplit(",", 1)]
-    return GpuInfo(name=name, memory_gb=round(float(memory_mb) / 1024, 1))
+def api_endpoint(base_url: str, suffix: str) -> str:
+    parsed = urlsplit(base_url.rstrip("/"))
+    path = f"{parsed.path.rstrip('/')}{suffix}"
+    return urlunsplit((parsed.scheme, parsed.netloc, path, "", ""))

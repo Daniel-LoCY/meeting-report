@@ -6,37 +6,16 @@ services:
     ports:
       - "${APP_PORT:-8001}:8000"
     environment:
-      OLLAMA_BASE_URL: "http://ollama:11434"
       APP_DATA_DIR: "/data"
-      WHISPER_CACHE_DIR: "/models/whisper"
-      WHISPER_MODEL: "${WHISPER_MODEL:-}"
-      WHISPER_DEVICE: "${WHISPER_DEVICE:-}"
-      WHISPER_COMPUTE_TYPE: "${WHISPER_COMPUTE_TYPE:-}"
-      OLLAMA_MODEL: "${OLLAMA_MODEL:-}"
+      EXTERNAL_API_BASE_URL: "${EXTERNAL_API_BASE_URL:-https://api.openai.com/v1}"
+      EXTERNAL_API_KEY: "${EXTERNAL_API_KEY:-}"
+      EXTERNAL_API_KEY_ENV: "EXTERNAL_API_KEY"
+      EXTERNAL_LLM_MODEL: "${EXTERNAL_LLM_MODEL:-gpt-4o-mini}"
+      EXTERNAL_TRANSCRIPTION_MODEL: "${EXTERNAL_TRANSCRIPTION_MODEL:-gpt-4o-mini-transcribe}"
+      EXTERNAL_TRANSCRIPTION_RESPONSE_FORMAT: "${EXTERNAL_TRANSCRIPTION_RESPONSE_FORMAT:-verbose_json}"
       DEFAULT_LANGUAGE: "zh"
       OUTPUT_LANGUAGE: "繁體中文"
-      MAX_UPLOAD_MB: "800"
+      MAX_UPLOAD_MB: "${MAX_UPLOAD_MB:-25}"
       PREVIEW_LIMIT: "${PREVIEW_LIMIT:-12000}"
     volumes:
       - ./data:/data
-      - whisper-cache:/models/whisper
-    depends_on:
-      - ollama
-    gpus: all
-
-  ollama:
-    image: ollama/ollama:latest
-    container_name: meeting-ollama
-    restart: unless-stopped
-    ports:
-      - "11434:11434"
-    environment:
-      OLLAMA_KEEP_ALIVE: "30m"
-      OLLAMA_HOST: "0.0.0.0:11434"
-    volumes:
-      - ollama-data:/root/.ollama
-    gpus: all
-
-volumes:
-  ollama-data:
-  whisper-cache:

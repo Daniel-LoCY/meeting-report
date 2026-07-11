@@ -6,13 +6,12 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-import requests
 from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from app.meeting_service import decorate_report, generate_report, transcribe_audio
-from app.model_selector import detect_hardware, recommend_models
+from app.meeting_service import decorate_report, external_api_status, generate_report, transcribe_audio
+from app.model_selector import ExternalAPIConfigurationError, recommend_models
 
 APP_DIR = Path(__file__).resolve().parent
 DATA_DIR = Path(__import__("os").getenv("APP_DATA_DIR", "/data"))
@@ -37,19 +36,15 @@ def index() -> FileResponse:
 
 @app.get("/api/health")
 def health() -> dict[str, Any]:
-    profile = detect_hardware()
-    recommendation = recommend_models(profile)
+    try:
+        recommendation = recommend_models()
+    except ExternalAPIConfigurationError as exc:
+        return {"status": "not_ready", "external_api": {"available": False, "detail": str(exc)}}
+    api_status = external_api_status(recommendation)
     return {
-        "status": "ok",
-        "hardware": {
-            "cpu_count": profile.cpu_count,
-            "memory_gb": profile.memory_gb,
-            "gpu": None
-            if profile.gpu is None
-            else {"name": profile.gpu.name, "memory_gb": profile.gpu.memory_gb},
-        },
+        "status": "ok" if api_status["available"] else "not_ready",
         "recommendation": recommendation.__dict__,
-        "ollama": _ollama_status(),
+        "external_api": api_status,
     }
 
 
@@ -78,7 +73,15 @@ def create_job(
                 raise HTTPException(status_code=413, detail=f"檔案超過 {MAX_UPLOAD_MB} MB。")
             buffer.write(chunk)
 
-    recommendation = recommend_models()
+    try:
+        recommendation = recommend_models()
+    except ExternalAPIConfigurationError as exc:
+        upload_path.unlink(missing_ok=True)
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    readiness = external_api_status(recommendation)
+    if not readiness["available"]:
+        upload_path.unlink(missing_ok=True)
+        raise HTTPException(status_code=503, detail=str(readiness.get("detail") or "外部 API 未就緒。"))
     report_path = REPORT_DIR / f"{job_id}_meeting_report.md"
     transcript_path = REPORT_DIR / f"{job_id}_transcript.md"
 
@@ -153,7 +156,7 @@ def _process_job(
 ) -> None:
     def progress(stage: str, message: str) -> None:
         progress_map = {
-            "loading_whisper": 15,
+            "uploading_audio": 15,
             "transcribing": 35,
             "checking_llm": 65,
             "summarizing": 82,
@@ -177,7 +180,7 @@ def _process_job(
         )
 
     try:
-        progress("loading_whisper", "準備轉錄")
+        progress("uploading_audio", "準備上傳音訊")
         transcript_meta = transcribe_audio(
             upload_path,
             recommendation,
@@ -241,17 +244,6 @@ def _public_job(job: dict[str, Any]) -> dict[str, Any]:
         data["report_url"] = f"/api/jobs/{job['id']}/report"
         data["transcript_url"] = f"/api/jobs/{job['id']}/transcript"
     return data
-
-
-def _ollama_status() -> dict[str, Any]:
-    import os
-
-    base_url = os.getenv("OLLAMA_BASE_URL", "http://ollama:11434").rstrip("/")
-    try:
-        response = requests.get(f"{base_url}/api/tags", timeout=3)
-        return {"available": response.ok, "models": response.json().get("models", []) if response.ok else []}
-    except requests.RequestException as exc:
-        return {"available": False, "error": str(exc)}
 
 
 def _safe_filename(name: str) -> str:

@@ -10,9 +10,9 @@
     <main class="shell">
       <section class="hero">
         <div>
-          <p class="eyebrow">Local AI Meeting Reporter</p>
+          <p class="eyebrow">External API Meeting Reporter</p>
           <h1>會議記錄整理工具</h1>
-          <p class="lead">上傳音訊或影片，使用 Docker 內的 faster-whisper 轉錄，再由 Ollama 地端模型整理成 Markdown 會議報告。</p>
+          <p class="lead">上傳音訊或影片，由外部 transcription API 轉錄，再由外部 LLM API 整理成 Markdown 會議報告。</p>
         </div>
         <div class="meter" aria-label="處理流程">
           <span>Upload</span>
@@ -26,7 +26,7 @@
         <form id="uploadForm" class="panel" autocomplete="off">
           <div class="panel-head">
             <h2>建立報告</h2>
-            <span class="status-pill" id="ollamaStatus">檢查中</span>
+            <span class="status-pill" id="externalApiStatus">檢查中</span>
           </div>
 
           <label class="field">
@@ -76,15 +76,13 @@
 
         <aside class="panel">
           <div class="panel-head">
-            <h2>硬體與模型</h2>
+            <h2>外部 API 與模型</h2>
             <button id="refreshHealth" class="ghost" type="button" title="重新檢查">重新檢查</button>
           </div>
-          <dl class="facts" id="hardwareFacts">
-            <div><dt>CPU</dt><dd>讀取中</dd></div>
-            <div><dt>RAM</dt><dd>讀取中</dd></div>
-            <div><dt>GPU</dt><dd>讀取中</dd></div>
-            <div><dt>Whisper</dt><dd>讀取中</dd></div>
-            <div><dt>Ollama</dt><dd>讀取中</dd></div>
+          <dl class="facts" id="providerFacts">
+            <div><dt>Endpoint</dt><dd>讀取中</dd></div>
+            <div><dt>轉錄模型</dt><dd>讀取中</dd></div>
+            <div><dt>報告模型</dt><dd>讀取中</dd></div>
           </dl>
           <p class="note" id="modelReason">正在取得建議模型。</p>
         </aside>

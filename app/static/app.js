@@ -1,9 +1,9 @@
 const form = document.querySelector("#uploadForm");
 const submitButton = form.querySelector("button[type='submit']");
 const refreshHealthButton = document.querySelector("#refreshHealth");
-const hardwareFacts = document.querySelector("#hardwareFacts");
+const providerFacts = document.querySelector("#providerFacts");
 const modelReason = document.querySelector("#modelReason");
-const ollamaStatus = document.querySelector("#ollamaStatus");
+const externalApiStatus = document.querySelector("#externalApiStatus");
 const jobIdLabel = document.querySelector("#jobId");
 const progressBar = document.querySelector("#progressBar");
 const progressText = document.querySelector("#progressText");
@@ -27,31 +27,35 @@ async function loadHealth() {
     const data = await response.json();
     renderHealth(data);
   } catch (error) {
-    ollamaStatus.textContent = "API 離線";
-    ollamaStatus.className = "status-pill bad";
+    externalApiStatus.textContent = "外部 API 離線";
+    externalApiStatus.className = "status-pill bad";
     modelReason.textContent = `無法取得健康狀態：${error.message}`;
   }
 }
 
 function renderHealth(data) {
-  const hardware = data.hardware;
-  const gpu = hardware.gpu ? `${hardware.gpu.name} (${hardware.gpu.memory_gb} GB)` : "未偵測到";
   const rec = data.recommendation;
-  hardwareFacts.innerHTML = `
-    <div><dt>CPU</dt><dd>${hardware.cpu_count} threads</dd></div>
-    <div><dt>RAM</dt><dd>${hardware.memory_gb} GB</dd></div>
-    <div><dt>GPU</dt><dd>${escapeHtml(gpu)}</dd></div>
-    <div><dt>Whisper</dt><dd>${escapeHtml(rec.whisper_model)} / ${escapeHtml(rec.whisper_device)} / ${escapeHtml(rec.whisper_compute_type)}</dd></div>
-    <div><dt>Ollama</dt><dd>${escapeHtml(rec.ollama_model)}</dd></div>
+  if (!rec) {
+    externalApiStatus.textContent = "外部 API 未就緒";
+    externalApiStatus.className = "status-pill bad";
+    providerFacts.innerHTML = `<div><dt>設定</dt><dd>無法讀取</dd></div>`;
+    modelReason.textContent = data.external_api?.detail || "外部 API 設定無效。";
+    return;
+  }
+  providerFacts.innerHTML = `
+    <div><dt>Endpoint</dt><dd>${escapeHtml(rec.base_url)}</dd></div>
+    <div><dt>轉錄模型</dt><dd>${escapeHtml(rec.transcription_model)}</dd></div>
+    <div><dt>報告模型</dt><dd>${escapeHtml(rec.llm_model)}</dd></div>
   `;
   modelReason.textContent = rec.reason;
 
-  if (data.ollama.available) {
-    ollamaStatus.textContent = "Ollama 已連線";
-    ollamaStatus.className = "status-pill ok";
+  if (data.external_api.available) {
+    externalApiStatus.textContent = "外部 API 已連線";
+    externalApiStatus.className = "status-pill ok";
   } else {
-    ollamaStatus.textContent = "Ollama 未就緒";
-    ollamaStatus.className = "status-pill bad";
+    externalApiStatus.textContent = "外部 API 未就緒";
+    externalApiStatus.className = "status-pill bad";
+    modelReason.textContent = data.external_api.detail || modelReason.textContent;
   }
 }
 

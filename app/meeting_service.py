@@ -1,31 +1,20 @@
 from __future__ import annotations
 
+import mimetypes
 import os
 import textwrap
 import time
 from collections.abc import Callable
-from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
 import requests
-from faster_whisper import WhisperModel
 
-from app.model_selector import ModelRecommendation
+from app.model_selector import ModelRecommendation, api_endpoint
 
 
 class MeetingProcessingError(RuntimeError):
     pass
-
-
-@lru_cache(maxsize=4)
-def get_whisper_model(model_size: str, device: str, compute_type: str) -> WhisperModel:
-    return WhisperModel(
-        model_size,
-        device=device,
-        compute_type=compute_type,
-        download_root=os.getenv("WHISPER_CACHE_DIR", "/models/whisper"),
-    )
 
 
 def transcribe_audio(
@@ -35,44 +24,46 @@ def transcribe_audio(
     progress,
     preview: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
-    progress("loading_whisper", "載入 Whisper 模型")
-    model = get_whisper_model(
-        recommendation.whisper_model,
-        recommendation.whisper_device,
-        recommendation.whisper_compute_type,
-    )
+    progress("uploading_audio", "上傳音訊至外部轉錄 API")
+    key = _api_key(recommendation)
+    mime_type = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
+    fields: dict[str, str] = {
+        "model": recommendation.transcription_model,
+        "response_format": os.getenv("EXTERNAL_TRANSCRIPTION_RESPONSE_FORMAT", "verbose_json"),
+    }
+    if language:
+        fields["language"] = language
 
-    progress("transcribing", "音訊轉文字")
-    segments, info = model.transcribe(
-        str(file_path),
-        language=language or None,
-        vad_filter=True,
-        beam_size=5,
-    )
+    try:
+        with file_path.open("rb") as audio_file:
+            response = requests.post(
+                api_endpoint(recommendation.base_url, "/audio/transcriptions"),
+                headers={"Authorization": f"Bearer {key}"},
+                data=fields,
+                files={"file": (file_path.name, audio_file, mime_type)},
+                timeout=(30, 1800),
+            )
+        response.raise_for_status()
+        payload = response.json()
+    except (OSError, ValueError, requests.RequestException) as exc:
+        raise MeetingProcessingError(f"外部語音轉錄 API 失敗：{_safe_api_error(exc)}") from exc
 
-    rows: list[dict[str, Any]] = []
-    transcript_parts: list[str] = []
-    for segment in segments:
-        text = segment.text.strip()
-        if not text:
-            continue
-        rows.append(
-            {
-                "start": round(segment.start, 2),
-                "end": round(segment.end, 2),
-                "text": text,
-            }
-        )
-        transcript_parts.append(f"[{_fmt_time(segment.start)} - {_fmt_time(segment.end)}] {text}")
-        if preview:
-            preview("\n".join(transcript_parts))
-
+    if not isinstance(payload, dict):
+        raise MeetingProcessingError("外部語音轉錄 API 回傳格式無效。")
+    transcript = str(payload.get("text") or "").strip()
+    if not transcript:
+        raise MeetingProcessingError("外部語音轉錄 API 回傳空白逐字稿。")
+    rows = _transcript_segments(payload)
+    formatted = _format_transcript(rows, transcript)
+    if preview:
+        preview(formatted)
+    progress("transcribing", "外部語音轉錄完成")
     return {
-        "language": info.language,
-        "language_probability": round(info.language_probability, 4),
-        "duration": round(info.duration, 2),
+        "language": str(payload.get("language") or language or "unknown"),
+        "language_probability": None,
+        "duration": _transcript_duration(rows),
         "segments": rows,
-        "transcript": "\n".join(transcript_parts),
+        "transcript": formatted,
     }
 
 
@@ -88,14 +79,12 @@ def generate_report(
     if not transcript.strip():
         raise MeetingProcessingError("轉錄結果為空，無法產生會議報告。")
 
-    progress("checking_llm", "確認 Ollama 模型")
-    ensure_ollama_model(recommendation.ollama_model)
-
+    progress("checking_llm", "確認外部 LLM API")
     chunks = split_text(transcript, max_chars=9000)
     if len(chunks) == 1:
-        progress("summarizing", "整理會議報告")
-        report = call_ollama(
-            recommendation.ollama_model,
+        progress("summarizing", "由外部 LLM 整理會議報告")
+        report = call_external_llm(
+            recommendation,
             build_final_prompt(meeting_title, transcript, output_language, report_mode),
         )
         if preview:
@@ -104,19 +93,19 @@ def generate_report(
 
     partials: list[str] = []
     for index, chunk in enumerate(chunks, start=1):
-        progress("summarizing", f"整理分段摘要 {index}/{len(chunks)}")
+        progress("summarizing", f"外部 LLM 整理分段摘要 {index}/{len(chunks)}")
         partials.append(
-            call_ollama(
-                recommendation.ollama_model,
+            call_external_llm(
+                recommendation,
                 build_chunk_prompt(meeting_title, chunk, output_language, index, len(chunks)),
             )
         )
         if preview:
             preview("\n\n".join(partials))
 
-    progress("summarizing", "合併分段摘要")
-    report = call_ollama(
-        recommendation.ollama_model,
+    progress("summarizing", "外部 LLM 合併分段摘要")
+    report = call_external_llm(
+        recommendation,
         build_final_prompt(meeting_title, "\n\n".join(partials), output_language, report_mode),
     )
     if preview:
@@ -124,51 +113,63 @@ def generate_report(
     return report
 
 
-def ensure_ollama_model(model: str) -> None:
-    base_url = os.getenv("OLLAMA_BASE_URL", "http://ollama:11434").rstrip("/")
-    try:
-        show = requests.post(f"{base_url}/api/show", json={"model": model}, timeout=20)
-        if show.ok:
-            return
-
-        with requests.post(
-            f"{base_url}/api/pull",
-            json={"model": model, "stream": True},
-            stream=True,
-            timeout=(20, 1800),
-        ) as response:
-            if not response.ok:
-                raise MeetingProcessingError(f"Ollama 無法下載模型 {model}: {response.text[:300]}")
-            for _ in response.iter_lines():
-                pass
-    except requests.RequestException as exc:
-        raise MeetingProcessingError(f"無法連線到 Ollama：{exc}") from exc
-
-
-def call_ollama(model: str, prompt: str) -> str:
-    base_url = os.getenv("OLLAMA_BASE_URL", "http://ollama:11434").rstrip("/")
+def call_external_llm(recommendation: ModelRecommendation, prompt: str) -> str:
     payload = {
-        "model": model,
-        "prompt": prompt,
-        "stream": False,
-        "options": {
-            "temperature": 0.2,
-            "top_p": 0.9,
-            "num_ctx": 16384,
-        },
+        "model": recommendation.llm_model,
+        "messages": [
+            {"role": "system", "content": "你是嚴謹的會議記錄整理助理。"},
+            {"role": "user", "content": prompt},
+        ],
+        "temperature": 0.2,
     }
+    try:
+        response = requests.post(
+            api_endpoint(recommendation.base_url, "/chat/completions"),
+            headers={"Authorization": f"Bearer {_api_key(recommendation)}"},
+            json=payload,
+            timeout=(30, 1200),
+        )
+        response.raise_for_status()
+        data = response.json()
+    except (ValueError, requests.RequestException) as exc:
+        raise MeetingProcessingError(f"外部 LLM API 產生報告失敗：{_safe_api_error(exc)}") from exc
 
     try:
-        response = requests.post(f"{base_url}/api/generate", json=payload, timeout=(20, 1200))
-        response.raise_for_status()
-    except requests.RequestException as exc:
-        raise MeetingProcessingError(f"Ollama 產生報告失敗：{exc}") from exc
-
-    data = response.json()
-    text = data.get("response", "").strip()
+        choices = data["choices"]
+        message = choices[0]["message"]
+        text = str(message["content"]).strip()
+    except (KeyError, IndexError, TypeError) as exc:
+        raise MeetingProcessingError("外部 LLM API 回傳格式無效。") from exc
     if not text:
-        raise MeetingProcessingError("Ollama 回傳空白結果。")
+        raise MeetingProcessingError("外部 LLM API 回傳空白結果。")
     return text
+
+
+def external_api_status(recommendation: ModelRecommendation) -> dict[str, Any]:
+    try:
+        key = _api_key(recommendation)
+        response = requests.get(
+            api_endpoint(recommendation.base_url, "/models"),
+            headers={"Authorization": f"Bearer {key}"},
+            timeout=10,
+        )
+        if response.status_code == 404:
+            return {
+                "available": True,
+                "model_check": "unsupported",
+                "detail": "外部 API 未提供 GET /models；會在第一個工作時驗證。",
+            }
+        response.raise_for_status()
+        payload = response.json()
+    except (MeetingProcessingError, ValueError, requests.RequestException) as exc:
+        return {"available": False, "detail": _safe_api_error(exc)}
+    models = payload.get("data") if isinstance(payload, dict) else []
+    model_ids = {str(item.get("id") or "") for item in models if isinstance(item, dict)}
+    required = {recommendation.llm_model, recommendation.transcription_model}
+    missing = sorted(required.difference(model_ids)) if model_ids else []
+    if missing:
+        return {"available": False, "detail": f"外部 API 找不到設定模型：{', '.join(missing)}"}
+    return {"available": True, "model_check": "passed", "detail": "外部 API 與設定模型均可用。"}
 
 
 def build_chunk_prompt(
@@ -237,7 +238,6 @@ def split_text(text: str, max_chars: int) -> list[str]:
     chunks: list[str] = []
     current: list[str] = []
     current_len = 0
-
     for paragraph in paragraphs:
         paragraph_len = len(paragraph) + 1
         if current and current_len + paragraph_len > max_chars:
@@ -246,7 +246,6 @@ def split_text(text: str, max_chars: int) -> list[str]:
             current_len = 0
         current.append(paragraph)
         current_len += paragraph_len
-
     if current:
         chunks.append("\n".join(current))
     return chunks
@@ -267,16 +266,60 @@ def decorate_report(
         source_file: "{source_name}"
         detected_language: "{transcript_meta.get("language")}"
         audio_duration_seconds: {transcript_meta.get("duration")}
-        whisper_model: "{recommendation.whisper_model}"
-        whisper_device: "{recommendation.whisper_device}"
-        whisper_compute_type: "{recommendation.whisper_compute_type}"
-        ollama_model: "{recommendation.ollama_model}"
+        transcription_model: "{recommendation.transcription_model}"
+        llm_model: "{recommendation.llm_model}"
+        inference_provider: "external_openai_compatible_api"
         known_limits: "AI 自動整理可能誤判講者、期限與專有名詞；正式發布前需人工覆核。"
         ---
 
         """
     ).lstrip()
     return metadata + report.strip() + "\n"
+
+
+def _api_key(recommendation: ModelRecommendation) -> str:
+    key = os.getenv(recommendation.api_key_env, "").strip()
+    if not key:
+        raise MeetingProcessingError(f"尚未設定外部 API key 環境變數：{recommendation.api_key_env}")
+    return key
+
+
+def _transcript_segments(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    raw_segments = payload.get("segments")
+    if not isinstance(raw_segments, list):
+        return []
+    rows: list[dict[str, Any]] = []
+    for segment in raw_segments:
+        if not isinstance(segment, dict):
+            continue
+        text = str(segment.get("text") or "").strip()
+        if not text:
+            continue
+        try:
+            start = round(float(segment.get("start", 0)), 2)
+            end = round(float(segment.get("end", start)), 2)
+        except (TypeError, ValueError):
+            continue
+        rows.append({"start": start, "end": max(start, end), "text": text})
+    return rows
+
+
+def _format_transcript(rows: list[dict[str, Any]], fallback: str) -> str:
+    if not rows:
+        return fallback
+    return "\n".join(f"[{_fmt_time(row['start'])} - {_fmt_time(row['end'])}] {row['text']}" for row in rows)
+
+
+def _transcript_duration(rows: list[dict[str, Any]]) -> float | None:
+    if not rows:
+        return None
+    return max(float(row["end"]) for row in rows)
+
+
+def _safe_api_error(exc: Exception) -> str:
+    if isinstance(exc, requests.HTTPError) and exc.response is not None:
+        return f"HTTP {exc.response.status_code}"
+    return str(exc)
 
 
 def _fmt_time(seconds: float) -> str:
