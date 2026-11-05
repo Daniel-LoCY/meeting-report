@@ -10,9 +10,9 @@
     <main class="shell">
       <section class="hero">
         <div>
-          <p class="eyebrow">WHISPER + EXTERNAL LLM MEETING REPORTER</p>
+          <p class="eyebrow">HYBRID MEETING REPORTER</p>
           <h1>會議記錄整理工具</h1>
-          <p class="lead">上傳音訊或影片，由本機 GPU Whisper 轉錄，再由外部 LLM API 整理成 Markdown 會議報告。</p>
+          <p class="lead">上傳音訊或影片，可選 Google Gemini 或本機 fast-whisper 轉逐字稿，再由 Google Gemini 整理成 Markdown 會議報告。</p>
         </div>
         <div class="meter" aria-label="處理流程">
           <span>Upload</span>
@@ -37,6 +37,14 @@
           <label class="field">
             <span>音訊或影片檔</span>
             <input name="file" type="file" accept="audio/*,video/*,.m4a,.mp3,.wav,.mp4,.mov,.mkv,.webm" required />
+          </label>
+
+          <label class="field">
+            <span>轉錄模式</span>
+            <select name="transcription_provider">
+              <option value="local_fast_whisper" selected>本機 fast-whisper</option>
+              <option value="google_gemini">Google Gemini API</option>
+            </select>
           </label>
 
           <div class="grid-two">
@@ -76,14 +84,14 @@
 
         <aside class="panel">
           <div class="panel-head">
-            <h2>Whisper 與外部報告 API</h2>
+            <h2>處理模式</h2>
             <button id="refreshHealth" class="ghost" type="button" title="重新檢查">重新檢查</button>
           </div>
           <dl class="facts" id="providerFacts">
-            <div><dt>報告 API</dt><dd>讀取中</dd></div>
+            <div><dt>Google API</dt><dd>讀取中</dd></div>
+            <div><dt>轉錄模型</dt><dd>讀取中</dd></div>
             <div><dt>報告模型</dt><dd>讀取中</dd></div>
-            <div><dt>Whisper</dt><dd>讀取中</dd></div>
-            <div><dt>轉錄裝置</dt><dd>讀取中</dd></div>
+            <div><dt>本機 Whisper</dt><dd>讀取中</dd></div>
           </dl>
           <p class="note" id="modelReason">正在取得建議模型。</p>
         </aside>

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import os
+import re
 import textwrap
 import time
 from collections.abc import Callable
@@ -9,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import requests
-from faster_whisper import WhisperModel
+from google import genai
 
 from app.model_selector import ModelRecommendation, api_endpoint
 
@@ -19,13 +21,40 @@ class MeetingProcessingError(RuntimeError):
 
 
 @lru_cache(maxsize=4)
-def get_whisper_model(model_size: str, device: str, compute_type: str) -> WhisperModel:
+def get_whisper_model(model_size: str, device: str, compute_type: str):
+    try:
+        from faster_whisper import WhisperModel
+    except ImportError as exc:
+        raise MeetingProcessingError("本機 fast-whisper 尚未安裝，無法使用本地轉錄模式。") from exc
     return WhisperModel(
         model_size,
         device=device,
         compute_type=compute_type,
         download_root=os.getenv("WHISPER_CACHE_DIR", "/models/whisper"),
     )
+
+
+TRANSCRIPT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "language": {"type": "string"},
+        "duration_seconds": {"type": "number"},
+        "segments": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "start_seconds": {"type": "number"},
+                    "end_seconds": {"type": "number"},
+                    "speaker": {"type": "string"},
+                    "text": {"type": "string"},
+                },
+                "required": ["start_seconds", "end_seconds", "text"],
+            },
+        },
+    },
+    "required": ["language", "segments"],
+}
 
 
 def transcribe_audio(
@@ -35,13 +64,71 @@ def transcribe_audio(
     progress,
     preview: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
-    progress("loading_whisper", "載入本機 Whisper 模型")
+    progress("uploading_audio", "上傳音訊或影片至 Google Gemini")
+    client = _google_client(recommendation)
+
+    try:
+        uploaded_file = client.files.upload(file=str(file_path))
+    except Exception as exc:  # noqa: BLE001
+        raise MeetingProcessingError(f"Google Gemini 檔案上傳失敗：{_safe_api_error(exc)}") from exc
+
+    progress("transcribing", "Google Gemini 音訊或影片轉文字")
+    prompt = build_transcription_prompt(language)
+    try:
+        response = client.models.generate_content(
+            model=recommendation.transcription_model,
+            contents=[uploaded_file, prompt],
+            config={
+                "temperature": 0.0,
+                "response_mime_type": "application/json",
+                "response_schema": TRANSCRIPT_SCHEMA,
+            },
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise MeetingProcessingError(f"Google Gemini 轉錄失敗：{_safe_api_error(exc)}") from exc
+
+    raw_text = _response_text(response)
+    payload = _parse_json_response(raw_text, "Google Gemini 轉錄", strict=False)
+    if payload is None:
+        rows = []
+        formatted = raw_text.strip()
+        language_value = language or "unknown"
+        duration_value = None
+    else:
+        rows = _transcript_segments(payload)
+        fallback_text = str(payload.get("text") or "").strip()
+        formatted = _format_transcript(rows, fallback_text)
+        language_value = str(payload.get("language") or language or "unknown")
+        duration_value = _transcript_duration(rows, payload.get("duration_seconds"))
+    if not formatted:
+        raise MeetingProcessingError("Google Gemini 回傳空白逐字稿。")
+    if preview:
+        preview(formatted)
+
+    return {
+        "provider": "google_gemini_api",
+        "language": language_value,
+        "language_probability": None,
+        "duration": duration_value,
+        "segments": rows,
+        "transcript": formatted,
+    }
+
+
+def transcribe_audio_local_whisper(
+    file_path: Path,
+    recommendation: ModelRecommendation,
+    language: str | None,
+    progress,
+    preview: Callable[[str], None] | None = None,
+) -> dict[str, Any]:
+    progress("loading_whisper", "載入本機 fast-whisper 模型")
     model = get_whisper_model(
         recommendation.whisper_model,
         recommendation.whisper_device,
         recommendation.whisper_compute_type,
     )
-    progress("transcribing", "本機 Whisper 音訊轉文字")
+    progress("transcribing", "本機 fast-whisper 音訊轉文字")
     segments, info = model.transcribe(
         str(file_path),
         language=language or None,
@@ -51,19 +138,25 @@ def transcribe_audio(
     rows: list[dict[str, Any]] = []
     transcript_parts: list[str] = []
     for segment in segments:
-        text = segment.text.strip()
+        text = str(segment.text).strip()
         if not text:
             continue
-        rows.append({"start": round(segment.start, 2), "end": round(segment.end, 2), "text": text})
-        transcript_parts.append(f"[{_fmt_time(segment.start)} - {_fmt_time(segment.end)}] {text}")
+        start = round(float(segment.start), 2)
+        end = round(float(segment.end), 2)
+        rows.append({"start": start, "end": end, "speaker": "", "text": text})
+        transcript_parts.append(f"[{_fmt_time(start)} - {_fmt_time(end)}] {text}")
         if preview:
             preview("\n".join(transcript_parts))
+    transcript = "\n".join(transcript_parts)
+    if not transcript:
+        raise MeetingProcessingError("本機 fast-whisper 回傳空白逐字稿。")
     return {
-        "language": info.language,
-        "language_probability": round(info.language_probability, 4),
-        "duration": round(info.duration, 2),
+        "provider": "local_fast_whisper",
+        "language": getattr(info, "language", language or "unknown"),
+        "language_probability": round(float(getattr(info, "language_probability", 0.0)), 4),
+        "duration": round(float(getattr(info, "duration", 0.0)), 2),
         "segments": rows,
-        "transcript": "\n".join(transcript_parts),
+        "transcript": transcript,
     }
 
 
@@ -79,10 +172,10 @@ def generate_report(
     if not transcript.strip():
         raise MeetingProcessingError("轉錄結果為空，無法產生會議報告。")
 
-    progress("checking_llm", "確認外部 LLM API")
+    progress("checking_llm", "確認 Google Gemini API")
     chunks = split_text(transcript, max_chars=9000)
     if len(chunks) == 1:
-        progress("summarizing", "由外部 LLM 整理會議報告")
+        progress("summarizing", "由 Google Gemini 整理會議報告")
         report = call_external_llm(
             recommendation,
             build_final_prompt(meeting_title, transcript, output_language, report_mode),
@@ -93,7 +186,7 @@ def generate_report(
 
     partials: list[str] = []
     for index, chunk in enumerate(chunks, start=1):
-        progress("summarizing", f"外部 LLM 整理分段摘要 {index}/{len(chunks)}")
+        progress("summarizing", f"Google Gemini 整理分段摘要 {index}/{len(chunks)}")
         partials.append(
             call_external_llm(
                 recommendation,
@@ -103,7 +196,7 @@ def generate_report(
         if preview:
             preview("\n\n".join(partials))
 
-    progress("summarizing", "外部 LLM 合併分段摘要")
+    progress("summarizing", "Google Gemini 合併分段摘要")
     report = call_external_llm(
         recommendation,
         build_final_prompt(meeting_title, "\n\n".join(partials), output_language, report_mode),
@@ -114,46 +207,73 @@ def generate_report(
 
 
 def call_external_llm(recommendation: ModelRecommendation, prompt: str) -> str:
-    payload = {
-        "model": recommendation.llm_model,
-        "messages": [
-            {"role": "system", "content": "你是嚴謹的會議記錄整理助理。"},
-            {"role": "user", "content": prompt},
-        ],
-        "temperature": 0.2,
-    }
+    client = _google_client(recommendation)
     try:
-        response = requests.post(
-            api_endpoint(recommendation.chat_base_url, "/chat/completions"),
-            headers={"Authorization": f"Bearer {_api_key(recommendation)}"},
-            json=payload,
-            timeout=(30, 1200),
+        response = client.models.generate_content(
+            model=recommendation.llm_model,
+            contents=prompt,
+            config={
+                "system_instruction": "你是嚴謹的會議記錄整理助理。",
+                "temperature": 0.2,
+            },
         )
-        response.raise_for_status()
-        data = response.json()
-    except (ValueError, requests.RequestException) as exc:
-        raise MeetingProcessingError(f"外部 LLM API 產生報告失敗：{_safe_api_error(exc)}") from exc
+    except Exception as exc:  # noqa: BLE001
+        raise MeetingProcessingError(f"Google Gemini 產生報告失敗：{_safe_api_error(exc)}") from exc
 
-    try:
-        choices = data["choices"]
-        message = choices[0]["message"]
-        text = str(message["content"]).strip()
-    except (KeyError, IndexError, TypeError) as exc:
-        raise MeetingProcessingError("外部 LLM API 回傳格式無效。") from exc
+    text = _response_text(response).strip()
     if not text:
-        raise MeetingProcessingError("外部 LLM API 回傳空白結果。")
+        raise MeetingProcessingError("Google Gemini 回傳空白結果。")
     return text
 
 
-def external_api_status(recommendation: ModelRecommendation) -> dict[str, Any]:
+def external_api_status(recommendation: ModelRecommendation, include_transcription: bool = True) -> dict[str, Any]:
     try:
-        statuses = [_external_model_status(recommendation.chat_base_url, _api_key(recommendation), recommendation.llm_model, "報告 LLM")]
+        key = _api_key(recommendation)
+        response = requests.get(
+            api_endpoint(recommendation.google_api_base_url, "/models"),
+            headers={"x-goog-api-key": key},
+            timeout=10,
+        )
+        response.raise_for_status()
+        payload = response.json()
     except (MeetingProcessingError, ValueError, requests.RequestException) as exc:
         return {"available": False, "detail": _safe_api_error(exc)}
-    failures = [status for status in statuses if not status["available"]]
-    if failures:
-        return {"available": False, "detail": "; ".join(str(item["detail"]) for item in failures)}
-    return {"available": True, "model_check": "passed", "detail": "; ".join(str(item["detail"]) for item in statuses)}
+
+    models = payload.get("models") if isinstance(payload, dict) else []
+    model_ids = _model_ids(models)
+    required = {recommendation.llm_model}
+    if include_transcription:
+        required.add(recommendation.transcription_model)
+    missing = sorted(model for model in required if model not in model_ids)
+    if missing:
+        return {"available": False, "detail": f"Google Gemini API 找不到設定模型：{', '.join(missing)}"}
+    return {"available": True, "model_check": "passed", "detail": "Google Gemini API key 與模型設定可用。"}
+
+
+def local_whisper_status(recommendation: ModelRecommendation) -> dict[str, Any]:
+    try:
+        from faster_whisper import WhisperModel  # noqa: F401
+    except ImportError:
+        return {"available": False, "detail": "容器內未安裝 faster-whisper。"}
+    return {
+        "available": True,
+        "detail": "本機 fast-whisper 已安裝；首次使用模型時會下載或載入快取。",
+        "model": recommendation.whisper_model,
+        "device": recommendation.whisper_device,
+        "compute_type": recommendation.whisper_compute_type,
+    }
+
+
+def build_transcription_prompt(language: str | None) -> str:
+    language_hint = language or "auto"
+    return textwrap.dedent(
+        f"""
+        請將音訊或影片中的語音完整轉成逐字稿。語言提示：{language_hint}。
+        請保留原語言，不要摘要、不要翻譯、不要省略內容。
+        若可辨識不同講者，請填入 speaker；無法辨識時可省略或使用「未指定」。
+        請以 JSON schema 回傳，每個 segment 都要包含 start_seconds、end_seconds、text。
+        """
+    ).strip()
 
 
 def build_chunk_prompt(
@@ -250,13 +370,13 @@ def decorate_report(
         source_file: "{source_name}"
         detected_language: "{transcript_meta.get("language")}"
         audio_duration_seconds: {transcript_meta.get("duration")}
+        transcription_model: "{recommendation.transcription_model}"
+        llm_model: "{recommendation.llm_model}"
         whisper_model: "{recommendation.whisper_model}"
         whisper_device: "{recommendation.whisper_device}"
         whisper_compute_type: "{recommendation.whisper_compute_type}"
-        llm_model: "{recommendation.llm_model}"
-        llm_endpoint: "{recommendation.chat_base_url}"
-        inference_provider: "external_openai_compatible_api"
-        known_limits: "AI 自動整理可能誤判講者、期限與專有名詞；正式發布前需人工覆核。"
+        inference_provider: "{transcript_meta.get("provider", "google_gemini_api")}"
+        known_limits: "AI 自動轉錄與整理可能誤判講者、期限與專有名詞；正式發布前需人工覆核。"
         ---
 
         """
@@ -264,28 +384,134 @@ def decorate_report(
     return metadata + report.strip() + "\n"
 
 
-def _external_model_status(base_url: str, key: str, model: str, label: str) -> dict[str, Any]:
-    response = requests.get(
-        api_endpoint(base_url, "/models"),
-        headers={"Authorization": f"Bearer {key}"},
-        timeout=10,
-    )
-    if response.status_code == 404:
-        return {"available": True, "detail": f"{label} endpoint 未提供 GET /models；會在第一個工作時驗證。"}
-    response.raise_for_status()
-    payload = response.json()
-    models = payload.get("data") if isinstance(payload, dict) else []
-    model_ids = {str(item.get("id") or "") for item in models if isinstance(item, dict)}
-    if model_ids and model not in model_ids:
-        return {"available": False, "detail": f"{label} API 找不到設定模型：{model}"}
-    return {"available": True, "detail": f"{label} API 已連線。"}
+def _google_client(recommendation: ModelRecommendation):
+    return genai.Client(api_key=_api_key(recommendation))
 
 
 def _api_key(recommendation: ModelRecommendation) -> str:
-    key = os.getenv(recommendation.chat_api_key_env, "").strip()
+    key = os.getenv(recommendation.google_api_key_env, "").strip()
     if not key:
-        raise MeetingProcessingError(f"尚未設定報告 LLM API key 環境變數：{recommendation.chat_api_key_env}")
+        raise MeetingProcessingError(f"尚未設定 Google Gemini API key 環境變數：{recommendation.google_api_key_env}")
     return key
+
+
+def _response_text(response: Any) -> str:
+    output_text = getattr(response, "output_text", None)
+    if output_text is not None:
+        return str(output_text)
+    text = getattr(response, "text", None)
+    if text is not None:
+        return str(text)
+    return str(response)
+
+
+def _parse_json_response(text: str, label: str, strict: bool = True) -> dict[str, Any] | None:
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
+        cleaned = re.sub(r"\s*```$", "", cleaned)
+    candidates = [cleaned]
+    extracted = _extract_json_object(cleaned)
+    if extracted and extracted != cleaned:
+        candidates.append(extracted)
+    last_error: json.JSONDecodeError | None = None
+    for candidate in candidates:
+        try:
+            payload = json.loads(candidate)
+        except json.JSONDecodeError as exc:
+            last_error = exc
+            continue
+        if not isinstance(payload, dict):
+            if strict:
+                raise MeetingProcessingError(f"{label} 回傳格式無效。")
+            return None
+        return payload
+    if strict:
+        raise MeetingProcessingError(f"{label} 回傳格式不是有效 JSON。") from last_error
+    return None
+
+
+def _extract_json_object(text: str) -> str | None:
+    start = text.find("{")
+    if start < 0:
+        return None
+    depth = 0
+    in_string = False
+    escaped = False
+    for index, char in enumerate(text[start:], start=start):
+        if escaped:
+            escaped = False
+            continue
+        if char == "\\" and in_string:
+            escaped = True
+            continue
+        if char == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : index + 1]
+    return None
+
+
+def _transcript_segments(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    raw_segments = payload.get("segments")
+    if not isinstance(raw_segments, list):
+        return []
+    rows: list[dict[str, Any]] = []
+    for segment in raw_segments:
+        if not isinstance(segment, dict):
+            continue
+        text = str(segment.get("text") or segment.get("content") or "").strip()
+        if not text:
+            continue
+        try:
+            start = round(float(segment.get("start_seconds", segment.get("start", 0))), 2)
+            end = round(float(segment.get("end_seconds", segment.get("end", start))), 2)
+        except (TypeError, ValueError):
+            continue
+        speaker = str(segment.get("speaker") or "").strip()
+        rows.append({"start": start, "end": max(start, end), "speaker": speaker, "text": text})
+    return rows
+
+
+def _format_transcript(rows: list[dict[str, Any]], fallback: str) -> str:
+    if not rows:
+        return fallback
+    lines = []
+    for row in rows:
+        speaker = f"{row['speaker']}: " if row.get("speaker") else ""
+        lines.append(f"[{_fmt_time(row['start'])} - {_fmt_time(row['end'])}] {speaker}{row['text']}")
+    return "\n".join(lines)
+
+
+def _transcript_duration(rows: list[dict[str, Any]], fallback: Any) -> float | None:
+    if rows:
+        return max(float(row["end"]) for row in rows)
+    try:
+        return round(float(fallback), 2)
+    except (TypeError, ValueError):
+        return None
+
+
+def _model_ids(models: Any) -> set[str]:
+    if not isinstance(models, list):
+        return set()
+    ids: set[str] = set()
+    for model in models:
+        if not isinstance(model, dict):
+            continue
+        name = str(model.get("name") or "")
+        if not name:
+            continue
+        ids.add(name)
+        ids.add(name.removeprefix("models/"))
+    return ids
 
 
 def _safe_api_error(exc: Exception) -> str:

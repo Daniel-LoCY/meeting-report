@@ -1,56 +1,46 @@
 # 會議記錄整理工具
 
-本專案採用混合流程：音訊／影片在本機用 GPU Whisper 轉錄，會議報告則使用外部 OpenAI-compatible Chat Completions API。預設外部 LLM 為 Google AI Studio 的 Gemini；本機不再使用 Ollama。
+本專案預設使用本機 fast-whisper 轉錄，並可在網頁切換成 Google Gemini API 轉錄。會議報告整理固定使用 Google Gemini API 產生 Markdown 報告。
 
 ## 流程
 
 ```mermaid
 flowchart LR
-    A[上傳音訊或影片] --> B[本機 GPU Whisper]
-    B --> C[逐字稿與預覽]
-    C --> D[外部 Chat Completions API]
-    D --> E[Markdown 會議報告]
+    A[上傳音訊或影片] --> B{網頁選擇轉錄模式}
+    B --> C[Google Gemini 音訊理解]
+    B --> D[本機 fast-whisper]
+    C --> E[逐字稿與預覽]
+    D --> E
+    E --> F[Gemini 會議報告整理]
+    F --> G[Markdown 會議報告]
 ```
 
 ## 環境需求
 
-- Docker Engine、Docker Compose v2、NVIDIA driver、NVIDIA Container Toolkit。
-- GPU Whisper 會自動選擇模型；RTX 4070 Ti 12 GB 預設使用 `medium/cuda/float16`。
-- 一個支援 `POST /chat/completions` 的外部 API。Google AI Studio 的 Gemini OpenAI-compatible endpoint 已可直接使用。 [Google Gemini OpenAI compatibility](https://ai.google.dev/gemini-api/docs/openai)
+- Docker Engine 與 Docker Compose v2。
+- Google AI Studio / Gemini API key。
+- 本機 fast-whisper 模式預設使用 CPU：`WHISPER_MODEL=base`、`WHISPER_DEVICE=cpu`、`WHISPER_COMPUTE_TYPE=int8`。
+- 不需要 Ollama。若要改用 GPU fast-whisper，需另外確認 Docker GPU runtime 與 CUDA 相容設定。
 
 ## Google AI Studio 設定
 
-1. 在 [Google AI Studio API Keys](https://aistudio.google.com/app/apikey) 建立或取得 Gemini API key。
-2. 複製 `.env.example` 成 `.env`。
-3. 填入 `MEETING_CHAT_API_KEY`，保留其餘 Google 預設值。
+1. 到 [Google AI Studio API Keys](https://aistudio.google.com/app/apikey) 建立或取得 Gemini API key。
+2. 複製 `.env.example` 成 `.env`，或沿用既有 `.env`。
+3. 建議設定 `GEMINI_API_KEY`；若目前只有舊的 `EXTERNAL_API_KEY`，`docker-compose.yml` 仍會把它映射成容器內的 `GEMINI_API_KEY`。
 
 ```bash
 cp .env.example .env
 ```
 
 ```dotenv
-MEETING_CHAT_API_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai
-MEETING_CHAT_API_KEY=replace-with-your-gemini-key
-MEETING_CHAT_MODEL=gemini-3.5-flash
-
-WHISPER_MODEL=medium
-WHISPER_DEVICE=cuda
-WHISPER_COMPUTE_TYPE=float16
+GEMINI_API_KEY=replace-with-your-gemini-key
+GOOGLE_API_BASE_URL=https://generativelanguage.googleapis.com/v1beta
+GOOGLE_TRANSCRIPTION_MODEL=gemini-3.1-flash-lite
+GOOGLE_LLM_MODEL=gemini-3.1-flash-lite
+WHISPER_MODEL=base
+WHISPER_DEVICE=cpu
+WHISPER_COMPUTE_TYPE=int8
 ```
-
-Gemini API key 應限制為 Gemini API；Google 已公告新的 AI Studio key 預設為 auth key，且會逐步停止接受未受限制的 standard key。 [Google Gemini API key guidance](https://ai.google.dev/gemini-api/docs/api-key)
-
-## 其他外部 LLM 供應商
-
-只要供應商支援 OpenAI-compatible Chat Completions，就覆寫下列三個欄位：
-
-| 欄位 | 用途 | Google AI Studio 預設 |
-|---|---|---|
-| `MEETING_CHAT_API_BASE_URL` | API base URL，不含 `/chat/completions` | `https://generativelanguage.googleapis.com/v1beta/openai` |
-| `MEETING_CHAT_API_KEY` | API key，不寫入 Git | Gemini API key |
-| `MEETING_CHAT_MODEL` | 報告生成模型 | `gemini-3.5-flash` |
-
-例如使用另一個相容服務時，設定其 endpoint、key 和 model 即可。轉錄不受這三個欄位影響，始終使用本機 Whisper。
 
 ## 啟動與驗證
 
@@ -60,46 +50,44 @@ docker compose up -d --force-recreate meeting-app
 curl http://localhost:8001/api/health
 ```
 
-健康狀態會同時顯示外部 LLM readiness 與 Whisper 的 model/device。確認 GPU runtime：
-
-```bash
-docker compose exec meeting-app nvidia-smi
-docker compose exec meeting-app python3 -c \
-  "import ctranslate2; print(ctranslate2.get_cuda_device_count())"
-```
-
 瀏覽器入口：
 
 ```text
 http://localhost:8001
 ```
 
+健康狀態會顯示 Google API base URL、Gemini 轉錄模型、報告模型、本機 fast-whisper model/device/compute type，以及 Google `/models` 檢查結果。預設轉錄模式是本機 fast-whisper，模型使用 `base/cpu/int8`；Gemini 轉錄備用模型是 `gemini-3.1-flash-lite`。
+
 ## 資料與隱私
 
-- 上傳音訊及影片會留在本機 `data/uploads/`，由本機 Whisper 轉錄。
-- 逐字稿會傳送至外部 LLM 以整理成報告；請確認該供應商的資料政策適合會議內容。
+- 上傳檔案會暫存在本機 `data/uploads/`。
+- 若選 Google Gemini API 轉錄，音訊／影片內容會送到 Google Gemini API。
+- 若選本機 fast-whisper 轉錄，音訊／影片內容留在容器內本機轉錄；首次使用模型會下載到 Docker volume `whisper-cache`。
+- 逐字稿會再送到 Google Gemini API 產生報告。
 - API key 只由 `.env` 傳入 container，不會出現在 health response、job response 或 Git。
 
 ## 測試
 
 ```bash
 docker compose run --rm --no-deps meeting-app \
-  python3 -m unittest discover -s tests -v
+  python -m unittest discover -s tests -v
 docker compose config --quiet
 ```
 
-測試會 mock Whisper 與 HTTP，不會下載 Whisper 模型、不會發送真實 API 請求或產生費用。
+測試會 mock Google SDK、HTTP 與 fast-whisper，不會下載 Whisper 模型、不會發送真實 API 請求或產生費用。
 
 ## 已知限制
 
+- Gemini 轉錄是音訊理解能力，不是專用 Google Cloud Speech-to-Text；若要即時轉錄或更細緻的 speech-to-text contract，需改接 Google Cloud Speech-to-Text。
+- 本機 fast-whisper 預設 CPU 模式較慢；長錄音建議使用 Gemini 轉錄或另外配置 GPU runtime。
 - job 狀態保存在記憶體；容器重啟後保留輸出檔，但不會恢復進行中的工作。
-- 報告內容由外部 LLM 產生，責任人、期限與決議仍需人工覆核。
-- 初次使用某個 Whisper model 時會下載至 Docker volume，之後會重用快取。
+- AI 自動轉錄與整理可能誤判講者、期限與專有名詞；正式發布前需人工覆核。
 
 ## 資訊來源 / 參考資料
 
-- 本地：[本機 Whisper 與外部 LLM adapter](/home/robertlo/Desktop/personal/Tool/meeting/app/meeting_service.py)。
-- 本地：[硬體與模型選擇](/home/robertlo/Desktop/personal/Tool/meeting/app/model_selector.py)。
-- 本地：[Docker GPU 與環境變數設定](/home/robertlo/Desktop/personal/Tool/meeting/docker-compose.yml)。
-- Google 官方：[OpenAI compatibility](https://ai.google.dev/gemini-api/docs/openai)，用途：Gemini Chat Completions endpoint、Bearer 認證與 model 設定；存取日期：2026-07-11。
-- Google 官方：[Using Gemini API keys](https://ai.google.dev/gemini-api/docs/api-key)，用途：key 建立與限制；存取日期：2026-07-11。
+- 本地：`/home/robertlo/Desktop/personal/Tool/meeting/app/meeting_service.py`，用途：Google Gemini Files API、`models.generate_content`、本機 fast-whisper 轉錄與報告生成流程。
+- 本地：`/home/robertlo/Desktop/personal/Tool/meeting/app/model_selector.py`，用途：Google API key、Gemini 模型與 fast-whisper 模型設定。
+- 本地：`/home/robertlo/Desktop/personal/Tool/meeting/docker-compose.yml`，用途：Docker 環境變數、Google API 與 fast-whisper cache 設定。
+- Google 官方：[Audio understanding](https://ai.google.dev/gemini-api/docs/audio)，用途：音訊上傳、音訊理解、逐字稿 prompt 與 structured output；存取日期：2026-07-11。
+- Google 官方：[Text generation](https://ai.google.dev/gemini-api/docs/text-generation)，用途：Gemini 文字生成、system instruction 與 generation config；存取日期：2026-07-11。
+- Google 官方：[Get started](https://ai.google.dev/gemini-api/docs/get-started)，用途：API key 建立與認證設定；存取日期：2026-07-11。

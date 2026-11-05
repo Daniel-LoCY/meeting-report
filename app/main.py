@@ -10,8 +10,15 @@ from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, UploadF
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from app.meeting_service import decorate_report, external_api_status, generate_report, transcribe_audio
-from app.model_selector import ExternalAPIConfigurationError, detect_hardware, recommend_models
+from app.meeting_service import (
+    decorate_report,
+    external_api_status,
+    generate_report,
+    local_whisper_status,
+    transcribe_audio,
+    transcribe_audio_local_whisper,
+)
+from app.model_selector import ExternalAPIConfigurationError, recommend_models
 
 APP_DIR = Path(__file__).resolve().parent
 DATA_DIR = Path(__import__("os").getenv("APP_DATA_DIR", "/data"))
@@ -41,16 +48,12 @@ def health() -> dict[str, Any]:
     except ExternalAPIConfigurationError as exc:
         return {"status": "not_ready", "external_api": {"available": False, "detail": str(exc)}}
     api_status = external_api_status(recommendation)
-    profile = detect_hardware()
+    whisper_status = local_whisper_status(recommendation)
     return {
         "status": "ok" if api_status["available"] else "not_ready",
-        "hardware": {
-            "cpu_count": profile.cpu_count,
-            "memory_gb": profile.memory_gb,
-            "gpu": None if profile.gpu is None else {"name": profile.gpu.name, "memory_gb": profile.gpu.memory_gb},
-        },
         "recommendation": recommendation.__dict__,
         "external_api": api_status,
+        "local_whisper": whisper_status,
     }
 
 
@@ -62,6 +65,7 @@ def create_job(
     language: str = Form("zh"),
     output_language: str = Form("繁體中文"),
     report_mode: str = Form("standard"),
+    transcription_provider: str = Form("local_fast_whisper"),
 ) -> dict[str, str]:
     if not file.filename:
         raise HTTPException(status_code=400, detail="缺少檔名。")
@@ -84,10 +88,19 @@ def create_job(
     except ExternalAPIConfigurationError as exc:
         upload_path.unlink(missing_ok=True)
         raise HTTPException(status_code=503, detail=str(exc)) from exc
-    readiness = external_api_status(recommendation)
+    if transcription_provider not in {"google_gemini", "local_fast_whisper"}:
+        upload_path.unlink(missing_ok=True)
+        raise HTTPException(status_code=400, detail="轉錄模式無效。")
+
+    readiness = external_api_status(recommendation, include_transcription=transcription_provider == "google_gemini")
     if not readiness["available"]:
         upload_path.unlink(missing_ok=True)
         raise HTTPException(status_code=503, detail=str(readiness.get("detail") or "外部 API 未就緒。"))
+    if transcription_provider == "local_fast_whisper":
+        whisper_readiness = local_whisper_status(recommendation)
+        if not whisper_readiness["available"]:
+            upload_path.unlink(missing_ok=True)
+            raise HTTPException(status_code=503, detail=str(whisper_readiness.get("detail") or "本機 fast-whisper 未就緒。"))
     report_path = REPORT_DIR / f"{job_id}_meeting_report.md"
     transcript_path = REPORT_DIR / f"{job_id}_transcript.md"
 
@@ -102,6 +115,7 @@ def create_job(
         "report_path": str(report_path),
         "transcript_path": str(transcript_path),
         "recommendation": recommendation.__dict__,
+        "transcription_provider": transcription_provider,
         "transcript_preview": "",
         "report_preview": "",
         "preview_updated_at": None,
@@ -118,6 +132,7 @@ def create_job(
         language,
         output_language,
         report_mode,
+        transcription_provider,
         file.filename,
         recommendation,
     )
@@ -157,13 +172,15 @@ def _process_job(
     language: str,
     output_language: str,
     report_mode: str,
+    transcription_provider: str,
     source_name: str,
     recommendation,
 ) -> None:
     def progress(stage: str, message: str) -> None:
         progress_map = {
+            "uploading_audio": 15,
             "loading_whisper": 15,
-            "transcribing": 35,
+            "transcribing": 40,
             "checking_llm": 65,
             "summarizing": 82,
             "saving": 95,
@@ -186,14 +203,24 @@ def _process_job(
         )
 
     try:
-        progress("loading_whisper", "準備本機 Whisper 轉錄")
-        transcript_meta = transcribe_audio(
-            upload_path,
-            recommendation,
-            language,
-            progress,
-            preview=lambda text: update_preview("transcript", text),
-        )
+        if transcription_provider == "local_fast_whisper":
+            progress("loading_whisper", "準備本機 fast-whisper")
+            transcript_meta = transcribe_audio_local_whisper(
+                upload_path,
+                recommendation,
+                language,
+                progress,
+                preview=lambda text: update_preview("transcript", text),
+            )
+        else:
+            progress("uploading_audio", "準備上傳至 Google Gemini")
+            transcript_meta = transcribe_audio(
+                upload_path,
+                recommendation,
+                language,
+                progress,
+                preview=lambda text: update_preview("transcript", text),
+            )
         update_preview("transcript", transcript_meta["transcript"])
         transcript_path.write_text(transcript_meta["transcript"], encoding="utf-8")
 
@@ -240,6 +267,7 @@ def _public_job(job: dict[str, Any]) -> dict[str, Any]:
         "progress",
         "source_name",
         "recommendation",
+        "transcription_provider",
         "transcript_preview",
         "report_preview",
         "preview_updated_at",

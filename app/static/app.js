@@ -42,17 +42,22 @@ function renderHealth(data) {
     modelReason.textContent = data.external_api?.detail || "外部 API 設定無效。";
     return;
   }
+  const whisper = data.local_whisper || {};
   providerFacts.innerHTML = `
-    <div><dt>報告 API</dt><dd>${escapeHtml(rec.chat_base_url)}</dd></div>
+    <div><dt>Google API</dt><dd>${escapeHtml(rec.google_api_base_url)}</dd></div>
+    <div><dt>Gemini 轉錄</dt><dd>${escapeHtml(rec.transcription_model)}</dd></div>
     <div><dt>報告模型</dt><dd>${escapeHtml(rec.llm_model)}</dd></div>
-    <div><dt>Whisper</dt><dd>${escapeHtml(rec.whisper_model)}</dd></div>
-    <div><dt>轉錄裝置</dt><dd>${escapeHtml(rec.whisper_device)} / ${escapeHtml(rec.whisper_compute_type)}</dd></div>
+    <div><dt>本機 Whisper</dt><dd>${escapeHtml(rec.whisper_model)} / ${escapeHtml(rec.whisper_device)} / ${escapeHtml(rec.whisper_compute_type)}</dd></div>
   `;
   modelReason.textContent = rec.reason;
 
-  if (data.external_api.available) {
-    externalApiStatus.textContent = "外部 API 已連線";
+  if (data.external_api.available && whisper.available) {
+    externalApiStatus.textContent = "兩種模式可用";
     externalApiStatus.className = "status-pill ok";
+  } else if (data.external_api.available) {
+    externalApiStatus.textContent = "Gemini 可用";
+    externalApiStatus.className = "status-pill ok";
+    modelReason.textContent = whisper.detail || modelReason.textContent;
   } else {
     externalApiStatus.textContent = "外部 API 未就緒";
     externalApiStatus.className = "status-pill bad";

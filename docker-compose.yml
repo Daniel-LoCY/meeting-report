@@ -7,14 +7,15 @@ services:
       - "${APP_PORT:-8001}:8000"
     environment:
       APP_DATA_DIR: "/data"
+      GOOGLE_API_BASE_URL: "${GOOGLE_API_BASE_URL:-https://generativelanguage.googleapis.com/v1beta}"
+      GEMINI_API_KEY: "${GEMINI_API_KEY:-${MEETING_GOOGLE_API_KEY:-${EXTERNAL_API_KEY:-}}}"
+      GOOGLE_API_KEY_ENV: "GEMINI_API_KEY"
+      GOOGLE_TRANSCRIPTION_MODEL: "${GOOGLE_TRANSCRIPTION_MODEL:-gemini-3.1-flash-lite}"
+      GOOGLE_LLM_MODEL: "${GOOGLE_LLM_MODEL:-gemini-3.1-flash-lite}"
       WHISPER_CACHE_DIR: "/models/whisper"
-      WHISPER_MODEL: "${WHISPER_MODEL:-}"
-      WHISPER_DEVICE: "${WHISPER_DEVICE:-}"
-      WHISPER_COMPUTE_TYPE: "${WHISPER_COMPUTE_TYPE:-}"
-      MEETING_CHAT_API_BASE_URL: "${MEETING_CHAT_API_BASE_URL:-https://generativelanguage.googleapis.com/v1beta/openai}"
-      MEETING_CHAT_API_KEY: "${MEETING_CHAT_API_KEY:-${EXTERNAL_API_KEY:-}}"
-      MEETING_CHAT_API_KEY_ENV: "MEETING_CHAT_API_KEY"
-      MEETING_CHAT_MODEL: "${MEETING_CHAT_MODEL:-gemini-3.5-flash}"
+      WHISPER_MODEL: "${WHISPER_MODEL:-base}"
+      WHISPER_DEVICE: "${WHISPER_DEVICE:-cpu}"
+      WHISPER_COMPUTE_TYPE: "${WHISPER_COMPUTE_TYPE:-int8}"
       DEFAULT_LANGUAGE: "zh"
       OUTPUT_LANGUAGE: "繁體中文"
       MAX_UPLOAD_MB: "${MAX_UPLOAD_MB:-800}"
@@ -22,7 +23,6 @@ services:
     volumes:
       - ./data:/data
       - whisper-cache:/models/whisper
-    gpus: all
 
 volumes:
   whisper-cache:
